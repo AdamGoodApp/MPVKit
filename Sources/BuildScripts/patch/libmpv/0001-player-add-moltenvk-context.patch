@@ -1,8 +1,8 @@
-diff --git forkSrcPrefix/meson.build forkDstPrefix/meson.build
-index 7572769e0e6f280391668c6797d67e37e2dea30f..e6109987a3d38025a5eede04441c03ee23413255 100644
---- forkSrcPrefix/meson.build
-+++ forkDstPrefix/meson.build
-@@ -1315,6 +1315,17 @@ if features['vulkan'] and features['x11']
+diff --git a/meson.build b/meson.build
+index fb10be5..42ece8e 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1330,6 +1330,17 @@ if features['vulkan'] and features['x11']
       sources += files('video/out/vulkan/context_xlib.c')
  endif
  
@@ -20,10 +20,22 @@ index 7572769e0e6f280391668c6797d67e37e2dea30f..e6109987a3d38025a5eede04441c03ee
  features += {'vk-khr-display': vulkan.type_name() == 'internal' or
                                 cc.has_function('vkCreateDisplayPlaneSurfaceKHR', prefix: '#include <vulkan/vulkan_core.h>',
                                                 dependencies: [vulkan])}
-diff --git forkSrcPrefix/video/out/gpu/context.c forkDstPrefix/video/out/gpu/context.c
-index 75dd804005ba3a1e36375b47dcc9d9bb756ab867..299841cb256372a04c3d1603f856695ce246ec01 100644
---- forkSrcPrefix/video/out/gpu/context.c
-+++ forkDstPrefix/video/out/gpu/context.c
+diff --git a/meson.options b/meson.options
+index 52782f7..81bc931 100644
+--- a/meson.options
++++ b/meson.options
+@@ -103,6 +103,7 @@ option('gl-dxinterop-d3d9', type: 'feature', value: 'auto', description: 'OpenGL
+ option('ios-gl', type: 'feature', value: 'auto', description: 'iOS OpenGL ES interop support')
+ option('videotoolbox-gl', type: 'feature', value: 'auto', description: 'Videotoolbox with OpenGL')
+ option('videotoolbox-pl', type: 'feature', value: 'auto', description: 'Videotoolbox with libplacebo')
++option('moltenvk', type: 'feature', value: 'auto', description: 'Moltenvk context')
+ 
+ # macOS features
+ option('macos-10-15-4-features', type: 'feature', value: 'auto', description: 'macOS 10.15.4 SDK Features')
+diff --git a/video/out/gpu/context.c b/video/out/gpu/context.c
+index 60c0641..a1e3952 100644
+--- a/video/out/gpu/context.c
++++ b/video/out/gpu/context.c
 @@ -50,6 +50,7 @@ extern const struct ra_ctx_fns ra_ctx_vulkan_xlib;
  extern const struct ra_ctx_fns ra_ctx_vulkan_android;
  extern const struct ra_ctx_fns ra_ctx_vulkan_display;
@@ -32,7 +44,7 @@ index 75dd804005ba3a1e36375b47dcc9d9bb756ab867..299841cb256372a04c3d1603f856695c
  
  /* Direct3D 11 */
  extern const struct ra_ctx_fns ra_ctx_d3d11;
-@@ -93,6 +94,9 @@ static const struct ra_ctx_fns *contexts[] = {
+@@ -93,6 +94,9 @@ static const struct ra_ctx_fns *const contexts[] = {
  #if HAVE_X11
      &ra_ctx_vulkan_xlib,
  #endif
@@ -42,10 +54,10 @@ index 75dd804005ba3a1e36375b47dcc9d9bb756ab867..299841cb256372a04c3d1603f856695c
  #if HAVE_COCOA && HAVE_SWIFT
      &ra_ctx_vulkan_mac,
  #endif
-diff --git forkSrcPrefix/video/out/vulkan/common.h forkDstPrefix/video/out/vulkan/common.h
-index e75cb228f8d99462ccecf7780098ea97ae7cfe02..afc17284773204563f4c90b4860758e61068d460 100644
---- forkSrcPrefix/video/out/vulkan/common.h
-+++ forkDstPrefix/video/out/vulkan/common.h
+diff --git a/video/out/vulkan/common.h b/video/out/vulkan/common.h
+index e75cb22..afc1728 100644
+--- a/video/out/vulkan/common.h
++++ b/video/out/vulkan/common.h
 @@ -22,6 +22,9 @@
  #if HAVE_WIN32_DESKTOP
  #define VK_USE_PLATFORM_WIN32_KHR
@@ -56,12 +68,12 @@ index e75cb228f8d99462ccecf7780098ea97ae7cfe02..afc17284773204563f4c90b4860758e6
  #if HAVE_COCOA
  #define VK_USE_PLATFORM_METAL_EXT
  #endif
-diff --git forkSrcPrefix/video/out/vulkan/context_moltenvk.m forkDstPrefix/video/out/vulkan/context_moltenvk.m
+diff --git a/video/out/vulkan/context_moltenvk.m b/video/out/vulkan/context_moltenvk.m
 new file mode 100644
-index 0000000000000000000000000000000000000000..445b907f795b24b8df80389394d4ae7b3f94c6e5
+index 0000000..cf46e32
 --- /dev/null
-+++ forkDstPrefix/video/out/vulkan/context_moltenvk.m
-@@ -0,0 +1,96 @@
++++ b/video/out/vulkan/context_moltenvk.m
+@@ -0,0 +1,152 @@
 +/*
 + * This file is part of mpv.
 + *
@@ -86,11 +98,50 @@ index 0000000000000000000000000000000000000000..445b907f795b24b8df80389394d4ae7b
 +#include "common.h"
 +#include "context.h"
 +#include "utils.h"
++#include "osdep/timer.h"
++#include "video/out/vo.h"
++
++// An embedded layer gets no window events, so nothing tells mpv when the host
++// app resizes it (rotation, window drag). The layer's drawableSize is the
++// source of truth: it is checked on every VOCTRL_CHECK_EVENTS, and an idle VO
++// (paused, or between frames) wakes at least this often so a resize is still
++// picked up without a new frame.
++#define MOLTENVK_RESIZE_POLL_NS MP_TIME_MS_TO_NS(100)
 +
 +struct priv {
 +    struct mpvk_ctx vk;
 +    CAMetalLayer *layer;
++    int width;
++    int height;
 +};
++
++static bool layer_size(struct priv *p, int *w, int *h)
++{
++    CGSize s = p->layer.drawableSize;
++    *w = s.width;
++    *h = s.height;
++    return *w > 0 && *h > 0;
++}
++
++// vo->dwidth/dheight are set on every call, not only on a change: vo_reconfig
++// resets them to the video size before it calls into the context.
++static bool resize(struct ra_ctx *ctx)
++{
++    struct priv *p = ctx->priv;
++    int w, h;
++    if (!layer_size(p, &w, &h))
++        return false;
++
++    ctx->vo->dwidth = w;
++    ctx->vo->dheight = h;
++    if (w == p->width && h == p->height)
++        return true;
++
++    MP_VERBOSE(ctx, "MoltenVK layer resized to %dx%d\n", w, h);
++    p->width = w;
++    p->height = h;
++    return ra_vk_ctx_resize(ctx, w, h);
++}
 +
 +static void moltenvk_uninit(struct ra_ctx *ctx)
 +{
@@ -139,15 +190,31 @@ index 0000000000000000000000000000000000000000..445b907f795b24b8df80389394d4ae7b
 +
 +static bool moltenvk_reconfig(struct ra_ctx *ctx)
 +{
-+    struct priv *p = ctx->priv;
-+    CGSize s = p->layer.drawableSize;
-+    ra_vk_ctx_resize(ctx, s.width, s.height);
++    resize(ctx);
 +    return true;
 +}
 +
 +static int moltenvk_control(struct ra_ctx *ctx, int *events, int request, void *arg)
 +{
-+    return VO_NOTIMPL;
++    if (request != VOCTRL_CHECK_EVENTS)
++        return VO_NOTIMPL;
++
++    struct priv *p = ctx->priv;
++    int w, h;
++    if (p->width && layer_size(p, &w, &h) && (w != p->width || h != p->height)) {
++        if (!resize(ctx))
++            return VO_ERROR;
++        *events |= VO_EVENT_RESIZE;
++    }
++    return VO_TRUE;
++}
++
++// Cap every idle wait so the VO thread loops back to VOCTRL_CHECK_EVENTS; a
++// vo_wakeup still ends the wait at once.
++static void moltenvk_wait_events(struct ra_ctx *ctx, int64_t until_time_ns)
++{
++    int64_t poll = mp_time_ns() + MOLTENVK_RESIZE_POLL_NS;
++    vo_wait_default(ctx->vo, MPMIN(until_time_ns, poll));
 +}
 +
 +const struct ra_ctx_fns ra_ctx_vulkan_moltenvk = {
@@ -155,18 +222,7 @@ index 0000000000000000000000000000000000000000..445b907f795b24b8df80389394d4ae7b
 +    .name           = "moltenvk",
 +    .reconfig       = moltenvk_reconfig,
 +    .control        = moltenvk_control,
++    .wait_events    = moltenvk_wait_events,
 +    .init           = moltenvk_init,
 +    .uninit         = moltenvk_uninit,
 +};
-diff --git forkSrcPrefix/meson.options forkDstPrefix/meson.options
-index dae0a333ef71b75a6bb36a236de7feebd99bda40..6ed28af20a09501b4997ca81e86bb198e75327fd 100644
---- forkSrcPrefix/meson.options
-+++ forkDstPrefix/meson.options
-@@ -101,6 +101,7 @@ option('gl-dxinterop-d3d9', type: 'feature', value: 'auto', description: 'OpenGL
- option('ios-gl', type: 'feature', value: 'auto', description: 'iOS OpenGL ES interop support')
- option('videotoolbox-gl', type: 'feature', value: 'auto', description: 'Videotoolbox with OpenGL')
- option('videotoolbox-pl', type: 'feature', value: 'auto', description: 'Videotoolbox with libplacebo')
-+option('moltenvk', type: 'feature', value: 'auto', description: 'Moltenvk context')
- 
- # macOS features
- option('macos-10-15-4-features', type: 'feature', value: 'auto', description: 'macOS 10.15.4 SDK Features')
